@@ -16,6 +16,8 @@ from datetime import datetime, timezone, timedelta
 
 import requests
 
+import pricing
+
 BASE = "https://yallatager.com/ar/"
 
 # الأقسام اللي بيتابعها البوت (احذف أي سطر مش عايزه)
@@ -148,6 +150,8 @@ HELP = """🤖 أوامر بوت أسعار يلا تاجر
 علشان شركاءك يتابعوا: اعمل جروب أو قناة على تيليجرام وضيف البوت فيها (في القناة لازم يكون أدمن).
 
 ممكن كمان تبعت الأرقام بس، مثلاً: 1 2
+
+💰 مراجعة أسعار MK وفولت: /prices
 البوت بيرد في أول مراجعة جاية للأسعار (كل 30 دقيقة تقريبًا)."""
 
 
@@ -218,8 +222,8 @@ def process_updates(s):
     cid = chat_id()
     res = tg("getUpdates", offset=s["offset"], timeout=0,
              allowed_updates=json.dumps(["message", "my_chat_member"])).get("result", [])
-    if not s.get("cmds_v2"):  # نسجل قائمة الأوامر في تيليجرام
-        s["cmds_v2"] = True
+    if not s.get("cmds_v3"):  # نسجل قائمة الأوامر في تيليجرام
+        s["cmds_v3"] = True
         tg("setMyCommands", commands=json.dumps([
             {"command": "list", "description": "عرض الأقسام"},
             {"command": "only", "description": "تابع أقسام معينة بس"},
@@ -227,8 +231,14 @@ def process_updates(s):
             {"command": "remove", "description": "شيل قسم"},
             {"command": "all", "description": "تابع كل الأقسام"},
             {"command": "groups", "description": "جروبات الشركاء"},
+            {"command": "prices", "description": "مراجعة أسعار MK وفولت"},
+            {"command": "review", "description": "مراجعة الأسعار"},
+            {"command": "shipping", "description": "شحن يلا تاجر"},
+            {"command": "suppliers", "description": "قوايم التجار المحفوظة"},
             {"command": "help", "description": "المساعدة"},
         ], ensure_ascii=False))
+    pst = pricing.load_state(TOKEN)
+    pst_before = json.dumps(pst, sort_keys=True)
     for u in res:
         s["offset"] = u["update_id"] + 1
         mcm = u.get("my_chat_member")
@@ -247,15 +257,51 @@ def process_updates(s):
             continue
         msg = u.get("message") or {}
         chat = msg.get("chat", {})
-        if chat.get("type") != "private" or "text" not in msg:
+        if chat.get("type") != "private" or not ("text" in msg or "document" in msg):
             continue
         if not cid:
             cid = str(chat["id"])
             open(CHAT_FILE, "w").write(cid)
         if str(chat["id"]) != cid:  # حد غيرك: نتجاهله
             continue
-        send(cid, handle(msg["text"], s))
+        try:
+            if "document" in msg:
+                send(cid, pricing.handle_document(msg["document"], pst, download))
+                continue
+            res_p = pricing.handle_text(msg["text"], pst)
+            if res_p is None:
+                send(cid, handle(msg["text"], s))
+            elif res_p[0] == "APPROVE":
+                approve(cid, pst)
+            else:
+                send(cid, res_p[0])
+        except Exception as e:  # أي غلطة في الأسعار متوقفش البوت
+            print("PRICING ERROR:", repr(e))
+            send(cid, f"⚠️ حصلت مشكلة: {e}")
+    if json.dumps(pst, sort_keys=True) != pst_before:  # نحفظ بس لو حاجة اتغيرت
+        pricing.save_state(TOKEN, pst)
     return cid
+
+
+def download(file_id):
+    path = tg("getFile", file_id=file_id)["result"]["file_path"]
+    r = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{path}", timeout=60)
+    r.raise_for_status()
+    return r.content
+
+
+def approve(cid, pst):
+    data, n = pricing.build_volt_file(pst, download(pst["volt"]["file_id"]))
+    if n == 0:
+        send(cid, "مفيش أي سعر اتغير، مفيش ملف.")
+        return
+    name = "volt-prices-" + datetime.now(CAIRO).strftime("%Y-%m-%d_%H%M") + ".xlsx"
+    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
+                  data={"chat_id": cid, "caption":
+                        f"📤 ملف استيراد فولت: {n} صنف اتغير سعرهم.\n"
+                        "الكمية فيه صفر، فالمخزون مش هيتغير.\n"
+                        "قبل التأكيد في فولت: بص إن كله «تحديث» مش «جديد»."},
+                  files={"document": (name, data)}, timeout=60)
 
 
 def send(cid, text):
