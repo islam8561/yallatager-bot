@@ -143,6 +143,9 @@ HELP = """🤖 أوامر بوت أسعار يلا تاجر
 /add 2 — ضيف قسم للمتابعة
 /remove 2 — شيل قسم من المتابعة
 /all — تابع كل الأقسام
+/groups — الجروبات والقنوات اللي بتوصلها الإشعارات
+
+علشان شركاءك يتابعوا: اعمل جروب أو قناة على تيليجرام وضيف البوت فيها (في القناة لازم يكون أدمن).
 
 ممكن كمان تبعت الأرقام بس، مثلاً: 1 2
 البوت بيرد في أول مراجعة جاية للأسعار (كل 30 دقيقة تقريبًا)."""
@@ -156,6 +159,7 @@ def load_settings():
     s.setdefault("enabled", SLUGS[:])
     s["enabled"] = [x for x in s["enabled"] if x in CATEGORIES]
     s.setdefault("offset", 0)
+    s.setdefault("groups", {})  # الجروبات/القنوات اللي الإشعارات بتتبعت لها كمان
     return s
 
 
@@ -186,6 +190,11 @@ def handle(text, s):
         return HELP + "\n\n" + list_text(en)
     if cmd in ("/list", "الأقسام", "الاقسام", "اقسام"):
         return list_text(en)
+    if cmd in ("/groups", "الجروبات"):
+        g = s["groups"]
+        if not g:
+            return "مفيش جروبات لسه.\nضيف البوت في جروب أو قناة شركاءك، وهيبدأ يبعت لهم الإشعارات."
+        return "👥 الإشعارات بتوصل كمان لـ:\n" + "\n".join(f"• {n}" for n in g.values()) + "\n\nعلشان توقف جروب: شيل البوت منه."
     if cmd in ("/all", "الكل"):
         s["enabled"] = SLUGS[:]
         return "✅ هتابع كل الأقسام.\n\n" + list_text(s["enabled"])
@@ -207,18 +216,35 @@ def handle(text, s):
 def process_updates(s):
     """بيقرا رسايلك للبوت وينفذ الأوامر. بيرجع رقم المحادثة"""
     cid = chat_id()
-    res = tg("getUpdates", offset=s["offset"], timeout=0).get("result", [])
-    if res and s["offset"] == 0:  # أول مرة: نسجل قائمة الأوامر في تيليجرام
+    res = tg("getUpdates", offset=s["offset"], timeout=0,
+             allowed_updates=json.dumps(["message", "my_chat_member"])).get("result", [])
+    if not s.get("cmds_v2"):  # نسجل قائمة الأوامر في تيليجرام
+        s["cmds_v2"] = True
         tg("setMyCommands", commands=json.dumps([
             {"command": "list", "description": "عرض الأقسام"},
             {"command": "only", "description": "تابع أقسام معينة بس"},
             {"command": "add", "description": "ضيف قسم"},
             {"command": "remove", "description": "شيل قسم"},
             {"command": "all", "description": "تابع كل الأقسام"},
+            {"command": "groups", "description": "جروبات الشركاء"},
             {"command": "help", "description": "المساعدة"},
         ], ensure_ascii=False))
     for u in res:
         s["offset"] = u["update_id"] + 1
+        mcm = u.get("my_chat_member")
+        if mcm and cid and str(mcm.get("from", {}).get("id")) == cid:  # إنت بس اللي تقدر تضيفه لجروب
+            gchat = mcm["chat"]
+            gid, gname = str(gchat["id"]), gchat.get("title", "جروب")
+            status = mcm.get("new_chat_member", {}).get("status")
+            if status in ("member", "administrator") and gchat.get("type") != "private":
+                if gid not in s["groups"]:
+                    s["groups"][gid] = gname
+                    send(cid, f"✅ اتضفت في «{gname}». الإشعارات هتوصل هناك كمان.")
+                    send(gid, "👋 أهلاً! هنا هتوصلكم تغييرات أسعار يلا تاجر أول بأول.")
+            elif status in ("left", "kicked") and gid in s["groups"]:
+                s["groups"].pop(gid)
+                send(cid, f"🚫 اتشلت من «{gname}». الإشعارات مش هتوصل هناك تاني.")
+            continue
         msg = u.get("message") or {}
         chat = msg.get("chat", {})
         if chat.get("type") != "private" or "text" not in msg:
@@ -308,7 +334,9 @@ def main():
             if removed_w:
                 msg.append("\n━━ اختفى من الموقع ━━")
                 msg += [f"❌ {k}  (كان {fmt(old[k])})" for k in removed_w]
-            send(cid, "\n".join(msg))
+            text = "\n".join(msg)
+            for target in [cid] + list(settings["groups"]):
+                send(target, text)
 
         if rows:
             first = not os.path.exists(HISTORY_FILE)
