@@ -284,6 +284,8 @@ def main():
     settings = load_settings()
     cid = process_updates(settings)
     save_settings(settings)
+    if sys.argv[1:] == ["commands"]:  # فحص سريع للأوامر بس من غير قراية الموقع
+        return
     if not cid:
         sys.exit("ابعت /start للبوت على تيليجرام الأول، وبعدين شغّل تاني")
     watched = {CATEGORIES[x] for x in settings["enabled"]}
