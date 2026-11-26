@@ -1,19 +1,9 @@
 {
  "enabled": [
   "Smart-Phone-(-Madein-Egypt-)",
-  "Tablets-(-made-in-egypt-)",
-  "Feature-Phone-(-Madein-Egypt-)",
-  "Accessories",
-  "Watches",
-  "AirPods",
-  "Active-Mobile",
-  "NTRA-Smart-Phone",
-  "Offers-and-Bundles",
-  "Used-Smart-Phones",
-  "Used-Accessories",
-  "Compressed-box"
+  "Tablets-(-made-in-egypt-)"
  ],
- "offset": 949492168,
+ "offset": 949492170,
  "groups": {
   "-1005787076870": "متابعة الأسعار"
  },
