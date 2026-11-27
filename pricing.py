@@ -42,8 +42,13 @@ def load_state(token):
     st.setdefault("volt", None)       # {file_id, date, items}
     st.setdefault("review", None)     # آخر مراجعة
     st.setdefault("shipping", None)   # شحن يلا تاجر للقطعة
-    st.setdefault("whole_add", 50)    # الجملة = سعر المورد + كام
+    st.setdefault("whole_add", 100)   # الجملة = أرخص مورد + كام
+    st.setdefault("retail_add", 500)  # القطاعي = أرخص مورد + كام
     st.setdefault("threshold", 500)   # أقل فرق يستاهل تنبيه
+    st.setdefault("applied", {})      # باركود -> [قطاعي, جملة] آخر أسعار البوت حطها (عشان نعرف اللي عدّلته بإيدك)
+    st.setdefault("min_change", 50)   # أقل فرق يستاهل نغيّر السعر عشانه
+    if st.get("rule_v") != 2:         # القاعدة: قطاعي = أرخص مورد + 500، جملة = أرخص مورد + 100
+        st.update(rule_v=2, retail_add=500, whole_add=100)
     st.setdefault("alerted", {})      # باركود -> آخر تكلفة اتبعتلك عنها تنبيه
     return st
 
@@ -199,6 +204,7 @@ def compute_entries(st):
     for sup, o in st["offers"].items():
         offers += [{**x, "supplier": sup, "is_yt": False} for x in o["items"]]
     entries, no_storage, no_offer, no_barcode = [], [], [], []
+    st["manual"] = []
     stock = (st.get("stock") or {}).get("items")
     for it in volt:
         if not it["barcode"]:
@@ -215,6 +221,10 @@ def compute_entries(st):
         if not exact:
             no_offer.append(it["name"])
             continue
+        ap = st["applied"].get(it["barcode"])
+        if ap and (round(it["sell"]) != round(ap[0]) or round(it["whole"]) != round(ap[1])):
+            st["manual"].append(it["name"])   # إنت غيّرت سعره بإيدك في فولت: مش هنلمسه
+            continue
         best = {}
         for o in exact:      # أرخص سعر لكل تاجر
             if o["supplier"] not in best or o["price"] < best[o["supplier"]]["price"]:
@@ -228,15 +238,6 @@ def compute_entries(st):
                         "whole": it["whole"], "opts": opts, "pick": opts[0]["supplier"],
                         "new_sell": None, "new_whole": None, "skip": False})
     return entries, no_storage, no_offer, no_barcode
-
-
-def important(e, st):
-    """الصنف يستاهل يظهر: فرق الجملة كبير، أو مفيش جملة، أو بيعك أقل من التكلفة، أو إنت عدّلته"""
-    cost, sell, whole = final_prices(e, st["whole_add"])
-    return (abs(whole - e["whole"]) >= st["threshold"] or not e["whole"] or sell < cost
-            or (e.get("buy") and min(sell, whole) < e["buy"])
-            or e["skip"] or e["new_sell"] is not None or e["new_whole"] is not None
-            or e["pick"] != e["opts"][0]["supplier"])
 
 
 def build_review(st):
@@ -254,31 +255,70 @@ def alerts(st):
     entries = compute_entries(st)[0]
     lines = []
     for e in entries:
-        cost, sell, whole = final_prices(e, st["whole_add"])
+        cost, sell, whole = final_prices(e, st)
         d = whole - e["whole"]
         if not e["whole"] or abs(d) < st["threshold"]:
             continue
         if st["alerted"].get(e["barcode"]) == cost:   # اتبعت قبل كده بنفس السعر
             continue
         st["alerted"][e["barcode"]] = cost
-        lines.append(card(e, st, f"{'🔺 زاد' if d > 0 else '🔻 نزل'} {fmt(abs(d))}ج:") + "\n")
+        e["n"] = "🔺" if d > 0 else "🔻"
+        lines.append(one_line(e, st) + ("\n    ⚠️ أقل من سعر شرائك (" + fmt(e["buy"]) + ") — مش هيتغير إلا لو قلت"
+                                       if status(e, st) == "loss" else ""))
     if not lines:
         return None
     head = f"🔔 فرق {fmt(st['threshold'])}ج أو أكتر في {len(lines)} صنف:\n"
     if st["shipping"] is None:
         head += "⚠️ شحن يلا تاجر مش متحدد (محسوب صفر) — ابعت مثلاً: /shipping 100\n"
-    return (head + LEGEND + "\n\n" + "\n".join(lines) + "\nاكتب: مراجعة")
+    return head + "\n" + "\n".join(lines) + "\n\nاكتب: مراجعة"
 
 
 def picked(e):
     return next((o for o in e["opts"] if o["supplier"] == e["pick"]), e["opts"][0])
 
 
-def final_prices(e, whole_add):
+def round10(v):
+    return int(-(-v // 10) * 10)   # نقرّب لأقرب 10 لفوق
+
+
+def rule_prices(e, st):
+    """الأسعار حسب القاعدة قبل أي تعديل منك"""
     cost = picked(e)["cost"]
-    sell = e["new_sell"] if e["new_sell"] is not None else e["sell"]
-    whole = e["new_whole"] if e["new_whole"] is not None else cost + whole_add
+    return cost, round10(cost + st["retail_add"]), round10(cost + st["whole_add"])
+
+
+def final_prices(e, st):
+    cost, sell, whole = rule_prices(e, st)
+    if e["new_sell"] is not None:
+        sell = e["new_sell"]
+    if e["new_whole"] is not None:
+        whole = e["new_whole"]
     return cost, sell, whole
+
+
+def status(e, st):
+    """changed / same / loss"""
+    cost, sell, whole = final_prices(e, st)
+    if abs(sell - e["sell"]) < st["min_change"] and abs(whole - e["whole"]) < st["min_change"] \
+            and e["new_sell"] is None and e["new_whole"] is None:
+        return "same"
+    if e.get("buy") and min(sell, whole) < e["buy"] and not e.get("force"):
+        return "loss"
+    return "changed"
+
+
+def short(name, n=38):
+    return name if len(name) <= n else name[:n - 1] + "…"
+
+
+def one_line(e, st):
+    cost, sell, whole = final_prices(e, st)
+    p = picked(e)
+    sup = f"{p['supplier']} {fmt(p['price'])}" + (f"+{fmt(p['cost'] - p['price'])}" if p["cost"] != p["price"] else "")
+    def arrow(old, new):
+        return fmt(new) if round(old) == round(new) else f"{fmt(old) if old else '—'} ← {fmt(new)}"
+    return (f"{e['n']}) {short(e['name'])}\n"
+            f"    قطاعي {arrow(e['sell'], sell)} • جملة {arrow(e['whole'], whole)}  ({sup})")
 
 
 def money_diff(v):
@@ -287,7 +327,7 @@ def money_diff(v):
 
 def card(e, st, head):
     """كارت صنف واحد بكلام واضح"""
-    cost, sell, whole = final_prices(e, st["whole_add"])
+    cost, sell, whole = final_prices(e, st)
     stock = f" — عندك {fmt(e['stock'])} قطعة" if e.get("stock") else ""
     lines = [f"{head} {e['name']}{stock}"]
     lines.append(f"   💰 سعرك دلوقتي: قطاعي {fmt(e['sell'])} • جملة {fmt(e['whole']) if e['whole'] else 'مش متحدد'}")
@@ -326,39 +366,46 @@ LEGEND = ("ℹ️ «سعرك دلوقتي» = اللي في فولت • «ال�
 
 def review_text(st, show_all=False):
     r = st["review"]
-    out = [f"📋 مراجعة الأسعار — {r['date']}"]
-    if st["shipping"] is None:
-        out.append("⚠️ مصاريف شحن يلا تاجر مش متحددة (اعتبرتها صفر). اكتب مثلاً: /shipping 100")
+    es = [e for e in r["entries"]]
+    changed = [e for e in es if not e["skip"] and status(e, st) == "changed"]
+    loss = [e for e in es if not e["skip"] and status(e, st) == "loss"]
+    skipped = [e for e in es if e["skip"]]
+    same = [e for e in es if not e["skip"] and status(e, st) == "same"]
+    out = [f"📋 الأسعار الجديدة — {r['date']}",
+           f"القاعدة: قطاعي = أرخص مورد + {fmt(st['retail_add'])} • جملة = أرخص مورد + {fmt(st['whole_add'])}"
+           + (f" • شحن يلا تاجر {fmt(st['shipping'])}" if st["shipping"] is not None else " • ⚠️ شحن يلا تاجر مش متحدد (/shipping 100)")]
+    if changed:
+        out.append(f"\n✅ هيتغيروا ({len(changed)}):")
+        out += [one_line(e, st) for e in changed]
     else:
-        out.append(f"🚚 شحن يلا تاجر: {fmt(st['shipping'])}ج على القطعة")
-    srcs = [f"{s} ({o['date']})" for s, o in st["offers"].items()]
-    out.append("📥 قوائم الواتس: " + ("، ".join(srcs) if srcs else "مفيش"))
-    out.append(f"📦 ملف فولت: {st['volt']['date']}")
-    if st.get("stock"):
-        out.append(f"📊 المخزون من ملف CSV: {st['stock']['date']} — بقارن الأصناف اللي ليها مخزون بس")
-    else:
-        out.append("📊 مفيش ملف مخزون، فبقارن كل الأصناف. ابعت ملف «تصدير (CSV)» من فولت عشان أقارن الموجود بس.")
-    out.append(f"الجملة المقترحة = سعر المورد ✅ + {st['whole_add']}")
-    out.append(LEGEND + "\n")
-    shown = [e for e in r["entries"] if show_all or important(e, st)]
-    hidden = len(r["entries"]) - len(shown)
-    out += [entry_text(e, st) for e in shown]
-    if not shown:
-        out.append(f"✅ مفيش أي صنف فرقه {fmt(st['threshold'])}ج أو أكتر.")
-    if hidden:
-        out.append(f"\n🙈 {hidden} صنف تانيين فرقهم أقل من {fmt(st['threshold'])}ج — اكتب: الكل")
-    if r["no_storage"]:
-        out.append("\n❔ ليهم أسعار بس اسمهم في فولت من غير سعة (ضيف السعة للاسم):")
-        out += [f"• {n}" for n in r["no_storage"]]
-    if r["no_barcode"]:
-        out.append("\n❗ من غير باركود في فولت (مش هيتعدلوا):")
-        out += [f"• {n}" for n in r["no_barcode"]]
+        out.append("\n✅ مفيش أسعار محتاجة تتغير.")
+    if loss:
+        out.append(f"\n⚠️ مش هيتغيروا إلا لو قلت ({len(loss)}) — السعر الجديد أقل من سعر شرائك:")
+        for e in loss:
+            cost, sell, whole = final_prices(e, st)
+            out.append(f"{e['n']}) {short(e['name'])}\n"
+                       f"    اشتريته بـ {fmt(e['buy'])} • السوق النهارده {fmt(cost)} ← قطاعي {fmt(sell)} • جملة {fmt(whole)}\n"
+                       f"    لو عايز تنزّل اكتب: {e['n']} نزّل")
+    if skipped:
+        out.append(f"\n⏭️ متخطّيين: " + "، ".join(f"{e['n']}" for e in skipped))
+    if show_all and same:
+        out.append("\n➖ مفيش تغيير:")
+        out += [one_line(e, st) for e in same]
+    elif same:
+        out.append(f"\n➖ {len(same)} صنف أسعارهم مظبوطة (اكتب «الكل» لو عايز تشوفهم)")
+    if st.get("manual"):
+        out.append(f"\n✋ سايبهم زي ما هم لأنك عدّلت سعرهم بإيدك في فولت ({len(st['manual'])}). "
+                   "لو عايزهم يرجعوا للقاعدة اكتب: /auto")
+    if r["no_storage"] or r["no_offer"] or r["no_barcode"]:
+        out.append("\n— أصناف مش هقدر أسعّرها —")
     if r["no_offer"]:
-        out.append("\n➖ موجودين عندك ومالقتلهمش سعر عند أي مورد:")
-        out += [f"• {n}" for n in r["no_offer"]]
-    out.append("\n✏️ للتعديل اكتب سطر أو أكتر:\n"
-               "3 بيع 12500  •  3 جملة 12000  •  3 العزيزي  •  3 تخطي  •  3 رجوع\n"
-               "ولما تخلص اكتب: موافق")
+        out.append("مالقتلهمش سعر عند أي مورد: " + "، ".join(short(n, 30) for n in r["no_offer"]))
+    if r["no_storage"]:
+        out.append("اسمهم من غير سعة (ضيف السعة في فولت): " + "، ".join(short(n, 30) for n in r["no_storage"]))
+    if r["no_barcode"]:
+        out.append("من غير باركود: " + "، ".join(short(n, 30) for n in r["no_barcode"]))
+    out.append("\n👍 لو تمام اكتب: موافق\n"
+               "✏️ تعديل (اختياري): 3 بيع 12500 • 3 جملة 12000 • 3 تخطي • 3 العزيزي • تفاصيل 3")
     return "\n".join(out)
 
 
@@ -375,6 +422,10 @@ def apply_edits(text, st):
     if not r:
         return None
     lines = [l.strip() for l in text.translate(AR_DIGITS).splitlines() if l.strip()]
+    m0 = re.match(r"^(تفاصيل|تفصيل)\s+(\d+)$", lines[0]) if lines else None
+    if m0 and len(lines) == 1:
+        e = {x["n"]: x for x in r["entries"]}.get(int(m0.group(2)))
+        return card(e, st, f"{e['n']})") if e else "مفيش صنف بالرقم ده"
     if not lines or not all(re.match(r"^\d+\s+[^\d\s]", l) for l in lines):
         return None
     byn = {e["n"]: e for e in r["entries"]}
@@ -393,20 +444,22 @@ def apply_edits(text, st):
                 e["new_whole"] = val
             else:
                 e["new_sell"] = val
-        elif rest in ("تخطي", "تخطى", "شيل"):
+        elif rest in ("تخطي", "تخطى", "شيل", "سيبه"):
             e["skip"] = True
+        elif rest in ("نزّل", "نزل", "نزله", "نزّله", "غيّر", "غير"):
+            e["force"] = True
+            e["skip"] = False
         elif rest in ("رجوع", "رجع"):
-            e.update(skip=False, new_sell=None, new_whole=None, pick=e["opts"][0]["supplier"])
+            e.update(skip=False, force=False, new_sell=None, new_whole=None, pick=e["opts"][0]["supplier"])
         else:
             sup = find_supplier(e, rest.replace("يلا", YT) if rest == "يلا" else rest)
             if not sup:
                 errors.append(f"{n}: مش فاهم «{rest}». التجار المتاحين: " + "، ".join(o["supplier"] for o in e["opts"]))
                 continue
             e["pick"] = sup
-            e["new_whole"] = None
         done.append(e)
     uniq = list({e["n"]: e for e in done}.values())
-    out = ["👌 اتعدّل:"] + [entry_text(e, st) for e in uniq]
+    out = ["👌 اتعدّل:"] + [one_line(e, st) + ("  ⏭️ متخطّي" if e["skip"] else "") for e in uniq]
     if errors:
         out.append("\n⚠️ " + "\n⚠️ ".join(errors))
     out.append("\nلما تخلص اكتب: موافق")
@@ -420,19 +473,25 @@ def build_volt_file(st, data):
     ws = wb.active
     head = [c.value for c in ws[1]]
     ix = {c: head.index(c) + 1 for c in VOLT_COLS}
-    changes = {}
+    changes, done, rule_of = {}, {}, {}
     for e in st["review"]["entries"]:
         if e["skip"]:
             continue
-        cost, sell, whole = final_prices(e, st["whole_add"])
-        if round(sell) != round(e["sell"]) or round(whole) != round(e["whole"]):
-            changes[e["barcode"]] = (e, round(sell), round(whole))
+        if status(e, st) != "changed":
+            continue
+        cost, sell, whole = final_prices(e, st)
+        changes[e["barcode"]] = (e, round(sell), round(whole))
     for row in range(ws.max_row, 1, -1):
         bc = str(ws.cell(row, ix["الباركود"]).value or "").strip()
         if bc not in changes:
             ws.delete_rows(row)
             continue
         e, sell, whole = changes.pop(bc)
+        done[bc] = (sell, whole)
+        if e["new_sell"] is not None or e["new_whole"] is not None:
+            # سعر كتبته بإيدك: نسجّل سعر القاعدة، فالبوت يعتبره «متعدّل بإيدك» وميرجعهوش
+            _, rs, rw = rule_prices(e, st)
+            rule_of[bc] = (rs, rw)
         ws.cell(row, ix["سعر البيع"]).value = sell
         ws.cell(row, ix["سعر بيع الجملة"]).value = whole
         ws.cell(row, ix["الكمية"]).value = 0          # صفر = المخزون مبيتغيرش
@@ -440,10 +499,10 @@ def build_volt_file(st, data):
     out = io.BytesIO()
     wb.save(out)
     # الأسعار الجديدة تبقى هي الأساس للمقارنة الجاية
-    newp = {e["barcode"]: final_prices(e, st["whole_add"]) for e in st["review"]["entries"] if not e["skip"]}
     for it in st["volt"]["items"]:
-        if it["barcode"] in newp:
-            _, it["sell"], it["whole"] = newp[it["barcode"]]
+        if it["barcode"] in done:
+            it["sell"], it["whole"] = done[it["barcode"]]
+            st["applied"][it["barcode"]] = list(rule_of.get(it["barcode"], done[it["barcode"]]))
     return out.getvalue(), ws.max_row - 1
 
 
@@ -464,7 +523,9 @@ PRICING_HELP = """💰 مراجعة أسعار MK
 4) عدّل لو حابب، وبعدين اكتب: موافق ← هيجيلك ملف تستورده في فولت.
 
 /shipping 100 — شحن يلا تاجر على القطعة
-/wholesale 50 — الجملة = سعر المورد + كام
+/retail 500 — القطاعي = أرخص مورد + كام
+/wholesale 100 — الجملة = أرخص مورد + كام
+/auto — رجّع الأصناف اللي عدّلتها بإيدك للقاعدة
 /threshold 500 — نبّهني لما الفرق يوصل كام
 الكل — اعرض كل الأصناف في المراجعة
 /suppliers — القوايم المحفوظة
@@ -485,6 +546,13 @@ def handle_text(text, st):
         if st["review"] and st["volt"]:
             build_review(st)
         return f"🚚 تمام، هزوّد {fmt(st['shipping'])}ج على كل سعر من يلا تاجر.", None
+    if cmd in ("/retail", "قطاعي"):
+        if arg:
+            st["retail_add"] = int(arg[0])
+        return f"القطاعي = أرخص مورد + {fmt(st['retail_add'])}", None
+    if cmd in ("/auto",):
+        st["applied"] = {}
+        return "🔄 كل الأصناف رجعت تمشي على القاعدة (حتى اللي عدّلتها بإيدك).", None
     if cmd in ("/wholesale", "جملة"):
         if arg:
             st["whole_add"] = int(arg[0])
