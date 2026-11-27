@@ -8,5 +8,6 @@
   "-1005787076870": "متابعة الأسعار"
  },
  "cmds_v2": true,
- "cmds_v3": true
+ "cmds_v3": true,
+ "worker_url": "https://mk-bot.pixelzoon8561.workers.dev"
 }
