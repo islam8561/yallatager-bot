@@ -151,6 +151,8 @@ def yallatager_offers(prices_path="data/prices.json", cats_path="data/cats.json"
         if not m:
             continue
         name, st, ram, war = m.groups()
+        if any(w in war for w in ("مفعل", "مستعمل", "قطع", "كسر", "فتح")):
+            continue      # مش جديد متبرشم: منقارنش بيه
         out.append({"supplier": YT + (" (وكيل)" if "وكيل" in war else ""), "is_yt": True,
                     "brand": name.split()[0].lower(), "raw": k, "model": model_key(name),
                     "is5g": is5g(name), "storage": int(st), "ram": int(ram), "price": price})
@@ -317,8 +319,11 @@ def one_line(e, st):
     sup = f"{p['supplier']} {fmt(p['price'])}" + (f"+{fmt(p['cost'] - p['price'])}" if p["cost"] != p["price"] else "")
     def arrow(old, new):
         return fmt(new) if round(old) == round(new) else f"{fmt(old) if old else '—'} ← {fmt(new)}"
+    big = ""
+    if e["sell"] and abs(sell - e["sell"]) / e["sell"] >= 0.15:
+        big = f"\n    ❗ فرق كبير ({'زيادة' if sell > e['sell'] else 'نقص'} {fmt(abs(sell - e['sell']))}) — اتأكد من السعر"
     return (f"{e['n']}) {short(e['name'])}\n"
-            f"    قطاعي {arrow(e['sell'], sell)} • جملة {arrow(e['whole'], whole)}  ({sup})")
+            f"    قطاعي {arrow(e['sell'], sell)} • جملة {arrow(e['whole'], whole)}  ({sup}){big}")
 
 
 def money_diff(v):
