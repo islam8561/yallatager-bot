@@ -9,5 +9,6 @@
  },
  "cmds_v2": true,
  "cmds_v3": true,
- "worker_url": "https://mk-bot.pixelzoon8561.workers.dev"
+ "worker_url": "https://mk-bot.pixelzoon8561.workers.dev",
+ "webhook_for": "https://mk-bot.pixelzoon8561.workers.dev"
 }
