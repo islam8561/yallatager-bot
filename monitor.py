@@ -220,12 +220,21 @@ def handle(text, s):
 def process_updates(s):
     """بيقرا رسايلك للبوت وينفذ الأوامر. بيرجع رقم المحادثة"""
     cid = chat_id()
-    worker = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+    worker = (os.environ.get("WORKER_URL", "") or s.get("worker_url", "")).strip().rstrip("/")
+    bot_secret = os.environ.get("BOT_SECRET", "").strip()
+    if not bot_secret:
+        worker = ""  # من غير BOT_SECRET نفضل على الطريقة القديمة
+    if worker and s.get("webhook_for") != worker:  # نربط تيليجرام بالوسيط مرة واحدة لوحدنا
+        r = tg("setWebhook", url=worker + "/tg", secret_token=bot_secret,
+               allowed_updates=json.dumps(["message", "my_chat_member"]))
+        print("setWebhook:", r)
+        if r.get("ok"):
+            s["webhook_for"] = worker
     res = []
     if worker:  # الرسايل بتيجي من وسيط Cloudflare (رد سريع)
         try:
             res = requests.get(worker + "/updates", params={"offset": s["offset"]},
-                               headers={"X-Key": os.environ.get("BOT_SECRET", "")},
+                               headers={"X-Key": bot_secret},
                                timeout=30).json().get("result", [])
         except Exception as e:
             print("WORKER ERROR:", repr(e))
