@@ -43,6 +43,8 @@ def load_state(token):
     st.setdefault("review", None)     # آخر مراجعة
     st.setdefault("shipping", None)   # شحن يلا تاجر للقطعة
     st.setdefault("whole_add", 50)    # الجملة = سعر المورد + كام
+    st.setdefault("threshold", 500)   # أقل فرق يستاهل تنبيه
+    st.setdefault("alerted", {})      # باركود -> آخر تكلفة اتبعتلك عنها تنبيه
     return st
 
 
@@ -189,7 +191,7 @@ def parse_volt_xlsx(data):
 
 # ---------- المراجعة ----------
 
-def build_review(st):
+def compute_entries(st):
     volt = st["volt"]["items"]
     ship = st["shipping"] or 0
     offers = yallatager_offers()
@@ -219,10 +221,48 @@ def build_review(st):
         entries.append({"barcode": it["barcode"], "name": it["name"], "sell": it["sell"],
                         "whole": it["whole"], "opts": opts, "pick": opts[0]["supplier"],
                         "new_sell": None, "new_whole": None, "skip": False})
+    return entries, no_storage, no_offer, no_barcode
+
+
+def important(e, st):
+    """الصنف يستاهل يظهر: فرق الجملة كبير، أو مفيش جملة، أو بيعك أقل من التكلفة، أو إنت عدّلته"""
+    cost, sell, whole = final_prices(e, st["whole_add"])
+    return (abs(whole - e["whole"]) >= st["threshold"] or not e["whole"] or sell < cost
+            or e["skip"] or e["new_sell"] is not None or e["new_whole"] is not None
+            or e["pick"] != e["opts"][0]["supplier"])
+
+
+def build_review(st):
+    entries, no_storage, no_offer, no_barcode = compute_entries(st)
     for i, e in enumerate(entries, 1):
         e["n"] = i
     st["review"] = {"date": now(), "entries": entries, "no_storage": no_storage,
                     "no_offer": no_offer, "no_barcode": no_barcode}
+
+
+def alerts(st):
+    """أصناف اتغيرت تكلفتها لدرجة إن الجملة المقترحة بعدت عن جملتك بـ threshold أو أكتر"""
+    if not st["volt"]:
+        return None
+    entries = compute_entries(st)[0]
+    lines = []
+    for e in entries:
+        cost, sell, whole = final_prices(e, st["whole_add"])
+        d = whole - e["whole"]
+        if not e["whole"] or abs(d) < st["threshold"]:
+            continue
+        if st["alerted"].get(e["barcode"]) == cost:   # اتبعت قبل كده بنفس السعر
+            continue
+        st["alerted"][e["barcode"]] = cost
+        best = e["opts"][0]
+        lines.append(f"{'🔺' if d > 0 else '🔻'} {e['name']}\n"
+                     f"   جملتك {fmt(e['whole'])} ← {fmt(whole)} ({'زاد' if d > 0 else 'نزل'} {fmt(abs(d))})"
+                     f" | قطاعي {fmt(sell)}{'  ⚠️' if sell < cost else ''}\n"
+                     f"   أرخص: {best['supplier']} {fmt(best['price'])}")
+    if not lines:
+        return None
+    return (f"🔔 فرق {fmt(st['threshold'])}ج أو أكتر في {len(lines)} صنف:\n\n" + "\n".join(lines)
+            + "\n\nاكتب: مراجعة")
 
 
 def picked(e):
@@ -252,7 +292,7 @@ def entry_text(e, st):
             f"   " + " • ".join(opts))
 
 
-def review_text(st):
+def review_text(st, show_all=False):
     r = st["review"]
     out = [f"📋 مراجعة الأسعار — {r['date']}"]
     if st["shipping"] is None:
@@ -263,7 +303,13 @@ def review_text(st):
     out.append("📥 قوائم الواتس: " + ("، ".join(srcs) if srcs else "مفيش"))
     out.append(f"📦 ملف فولت: {st['volt']['date']}")
     out.append(f"الجملة = سعر المورد المختار + {st['whole_add']}\n")
-    out += [entry_text(e, st) for e in r["entries"]]
+    shown = [e for e in r["entries"] if show_all or important(e, st)]
+    hidden = len(r["entries"]) - len(shown)
+    out += [entry_text(e, st) for e in shown]
+    if not shown:
+        out.append(f"✅ مفيش أي صنف فرقه {fmt(st['threshold'])}ج أو أكتر.")
+    if hidden:
+        out.append(f"\n🙈 {hidden} صنف تانيين فرقهم أقل من {fmt(st['threshold'])}ج — اكتب: الكل")
     if r["no_storage"]:
         out.append("\n❔ ليهم أسعار بس اسمهم في فولت من غير سعة (ضيف السعة للاسم):")
         out += [f"• {n}" for n in r["no_storage"]]
@@ -355,7 +401,20 @@ def build_volt_file(st, data):
         ws.cell(row, ix["قائمة السيريالات"]).value = ""
     out = io.BytesIO()
     wb.save(out)
+    # الأسعار الجديدة تبقى هي الأساس للمقارنة الجاية
+    newp = {e["barcode"]: final_prices(e, st["whole_add"]) for e in st["review"]["entries"] if not e["skip"]}
+    for it in st["volt"]["items"]:
+        if it["barcode"] in newp:
+            _, it["sell"], it["whole"] = newp[it["barcode"]]
     return out.getvalue(), ws.max_row - 1
+
+
+def volt_age_warning(st):
+    d = datetime.strptime(st["volt"]["date"], "%Y-%m-%d %H:%M").replace(tzinfo=CAIRO)
+    if datetime.now(CAIRO) - d > timedelta(hours=24):
+        return ("⚠️ ملف فولت ده من " + st["volt"]["date"] +
+                ". لو اشتريت بضاعة من ساعتها، صدّر ملف جديد قبل الاستيراد عشان سعر الشراء ميرجعش قديم.")
+    return ""
 
 
 # ---------- استقبال الرسايل ----------
@@ -368,6 +427,8 @@ PRICING_HELP = """💰 مراجعة أسعار MK
 
 /shipping 100 — شحن يلا تاجر على القطعة
 /wholesale 50 — الجملة = سعر المورد + كام
+/threshold 500 — نبّهني لما الفرق يوصل كام
+الكل — اعرض كل الأصناف في المراجعة
 /suppliers — القوايم المحفوظة
 /clear — امسح قوايم الواتس"""
 
@@ -398,6 +459,15 @@ def handle_text(text, st):
     if cmd in ("/clear", "مسح"):
         st["offers"] = {}
         return "🧹 اتمسحت قوايم الواتس.", None
+    if cmd in ("/all", "الكل"):
+        if not st["review"]:
+            return "مفيش مراجعة. اكتب: مراجعة", None
+        return review_text(st, show_all=True), None
+    if cmd in ("/threshold", "فرق"):
+        if arg:
+            st["threshold"] = int(arg[0])
+            st["alerted"] = {}
+        return f"🔔 هنبهك لما فرق الجملة يوصل {fmt(st['threshold'])}ج أو أكتر.", None
     if cmd in ("/review", "مراجعة", "مراجعه"):
         if not st["volt"]:
             return "ابعتلي الأول ملف «تصدير Excel للاستيراد» من فولت.", None
@@ -421,7 +491,11 @@ def handle_text(text, st):
         if None in found:
             msg.append(f"⚠️ فيه {len(found[None])} سعر مش عارف تاجرهم مين — "
                        "ابعتهم تاني واكتب اسم التاجر في أول سطر.")
-        msg.append("ابعت قوايم تانية أو اكتب: مراجعة")
+        al = alerts(st)
+        if al:
+            msg.append("\n" + al)
+        else:
+            msg.append("ابعت قوايم تانية أو اكتب: مراجعة")
         return "\n".join(msg), None
     return None
 

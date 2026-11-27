@@ -300,7 +300,8 @@ def approve(cid, pst):
                   data={"chat_id": cid, "caption":
                         f"📤 ملف استيراد فولت: {n} صنف اتغير سعرهم.\n"
                         "الكمية فيه صفر، فالمخزون مش هيتغير.\n"
-                        "قبل التأكيد في فولت: بص إن كله «تحديث» مش «جديد»."},
+                        "قبل التأكيد في فولت: بص إن كله «تحديث» مش «جديد».\n"
+                        + pricing.volt_age_warning(pst)},
                   files={"document": (name, data)}, timeout=60)
 
 
@@ -397,6 +398,18 @@ def main():
 
     json.dump(dict(sorted(new.items())), open(STATE_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
     json.dump(dict(sorted(cats.items())), open(CATS_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=0)
+
+    # تنبيه أسعار MK: لو أسعار يلا تاجر الجديدة عملت فرق كبير في الجملة (ليك إنت بس، مش للجروبات)
+    try:
+        pst = pricing.load_state(TOKEN)
+        before = json.dumps(pst, sort_keys=True)
+        al = pricing.alerts(pst)
+        if al:
+            send(cid, al)
+        if json.dumps(pst, sort_keys=True) != before:
+            pricing.save_state(TOKEN, pst)
+    except Exception as e:
+        print("PRICING ALERT ERROR:", repr(e))
 
 
 if __name__ == "__main__":
