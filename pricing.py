@@ -199,10 +199,13 @@ def compute_entries(st):
     for sup, o in st["offers"].items():
         offers += [{**x, "supplier": sup, "is_yt": False} for x in o["items"]]
     entries, no_storage, no_offer, no_barcode = [], [], [], []
+    stock = (st.get("stock") or {}).get("items")
     for it in volt:
         if not it["barcode"]:
             no_barcode.append(it["name"])
             continue
+        if stock is not None and stock.get(it["barcode"], 0) <= 0:
+            continue          # مخزونه صفر: مش محتاجين نقارنه
         same = [o for o in offers if o["model"] == it["model"] and o["is5g"] == it["is5g"]
                 and (it["brand"] is None or o["brand"] in (None, it["brand"]))]
         if it["storage"] is None:
@@ -221,6 +224,7 @@ def compute_entries(st):
                        for s, o in best.items()), key=lambda x: x["cost"])
         entries.append({"barcode": it["barcode"], "name": it["name"], "sell": it["sell"],
                         "buy": it.get("buy", 0),
+                        "stock": stock.get(it["barcode"]) if stock is not None else None,
                         "whole": it["whole"], "opts": opts, "pick": opts[0]["supplier"],
                         "new_sell": None, "new_whole": None, "skip": False})
     return entries, no_storage, no_offer, no_barcode
@@ -257,20 +261,13 @@ def alerts(st):
         if st["alerted"].get(e["barcode"]) == cost:   # اتبعت قبل كده بنفس السعر
             continue
         st["alerted"][e["barcode"]] = cost
-        best = e["opts"][0]
-        lines.append(f"{'🔺' if d > 0 else '🔻'} {e['name']}\n"
-                     f"   جملتك {fmt(e['whole'])} ← المقترح {fmt(whole)} ({'زاد' if d > 0 else 'نزل'} {fmt(abs(d))})"
-                     f" | قطاعي {fmt(sell)}{'  ⚠️' if sell < cost else ''}"
-                     + profit_text(e, sell, whole) + "\n"
-                     f"   أرخص: {best['supplier']} {fmt(best['price'])}"
-                     + (f" (+{fmt(best['cost'] - best['price'])} شحن)" if best['cost'] != best['price'] else ""))
+        lines.append(card(e, st, f"{'🔺 زاد' if d > 0 else '🔻 نزل'} {fmt(abs(d))}ج:") + "\n")
     if not lines:
         return None
     head = f"🔔 فرق {fmt(st['threshold'])}ج أو أكتر في {len(lines)} صنف:\n"
     if st["shipping"] is None:
         head += "⚠️ شحن يلا تاجر مش متحدد (محسوب صفر) — ابعت مثلاً: /shipping 100\n"
-    return (head + "\n" + "\n".join(lines)
-            + "\n\n🔴 = هتبيع بأقل من سعر شرائك. سعر الشراء في فولت مبيتغيرش أبداً.\nاكتب: مراجعة")
+    return (head + LEGEND + "\n\n" + "\n".join(lines) + "\nاكتب: مراجعة")
 
 
 def picked(e):
@@ -284,32 +281,47 @@ def final_prices(e, whole_add):
     return cost, sell, whole
 
 
-def profit_text(e, sell, whole):
-    """ربحك على سعر الشراء الأصلي (اللي في فولت)"""
-    buy = e.get("buy") or 0
-    if not buy:
-        return ""
-    def one(label, v):
-        d = v - buy
-        return f"{label} {'+' if d >= 0 else '−'}{fmt(abs(d))}{' 🔴' if d < 0 else ''}"
-    return f"\n   شراءك {fmt(buy)} ← ربح: {one('قطاعي', sell)} • {one('جملة', whole)}"
+def money_diff(v):
+    return f"+{fmt(v)}" if v >= 0 else f"خسارة {fmt(-v)} 🔴"
+
+
+def card(e, st, head):
+    """كارت صنف واحد بكلام واضح"""
+    cost, sell, whole = final_prices(e, st["whole_add"])
+    stock = f" — عندك {fmt(e['stock'])} قطعة" if e.get("stock") else ""
+    lines = [f"{head} {e['name']}{stock}"]
+    lines.append(f"   💰 سعرك دلوقتي: قطاعي {fmt(e['sell'])} • جملة {fmt(e['whole']) if e['whole'] else 'مش متحدد'}")
+    ch = []
+    if round(whole) != round(e["whole"]):
+        ch.append(f"جملة {fmt(whole)}")
+    if round(sell) != round(e["sell"]):
+        ch.append(f"قطاعي {fmt(sell)}")
+    if ch:
+        same = "" if round(sell) != round(e["sell"]) else " (القطاعي زي ما هو)"
+        lines.append(f"   ✏️ المقترح: {' • '.join(ch)}{same}")
+    else:
+        lines.append("   ✏️ المقترح: مفيش تغيير")
+    if sell < cost:
+        lines.append(f"   ⚠️ القطاعي بتاعك أقل من سعر المورد النهارده ({fmt(cost)})")
+    if e.get("buy"):
+        lines.append(f"   📦 اشتريته بـ {fmt(e['buy'])} — ربحك لو وافقت: "
+                     f"قطاعي {money_diff(sell - e['buy'])} • جملة {money_diff(whole - e['buy'])}")
+    opts = []
+    for o in e["opts"]:
+        p = fmt(o["price"]) + (f" + {fmt(o['cost'] - o['price'])} شحن" if o["cost"] != o["price"] else "")
+        opts.append(("✅ " if o["supplier"] == e["pick"] else "") + f"{o['supplier']} {p}")
+    lines.append("   🏪 الموردين النهارده: " + " • ".join(opts))
+    return "\n".join(lines)
 
 
 def entry_text(e, st):
-    cost, sell, whole = final_prices(e, st["whole_add"])
     if e["skip"]:
-        return f"{e['n']}) ⏭️ {e['name']}  (متخطّي)"
-    warn = "  ⚠️ أقل من التكلفة" if sell < cost else ""
-    sell_txt = fmt(e["sell"]) if sell == e["sell"] else f"{fmt(e['sell'])} ← {fmt(sell)}"
-    whole_txt = fmt(e["whole"]) if round(whole) == round(e["whole"]) else f"{fmt(e['whole'])} ← {fmt(whole)}"
-    opts = []
-    for o in e["opts"]:
-        p = f"{fmt(o['price'])}+{fmt(o['cost'] - o['price'])}" if o["cost"] != o["price"] else fmt(o["price"])
-        opts.append(("✅ " if o["supplier"] == e["pick"] else "") + f"{o['supplier']} {p}")
-    return (f"{e['n']}) {e['name']}\n"
-            f"   قطاعي {sell_txt}{warn} | جملة {whole_txt}"
-            + profit_text(e, sell, whole) + "\n"
-            f"   " + " • ".join(opts))
+        return f"{e['n']}) ⏭️ {e['name']}  (متخطّي — مش هيتعدل)"
+    return card(e, st, f"{e['n']})")
+
+
+LEGEND = ("ℹ️ «سعرك دلوقتي» = اللي في فولت • «المقترح» = اللي هيتكتب في فولت لو وافقت\n"
+          "«اشتريته بـ» = سعر الشراء الأصلي في فولت (مبيتغيرش) • ✅ = المورد اللي الجملة محسوبة عليه")
 
 
 def review_text(st, show_all=False):
@@ -322,7 +334,12 @@ def review_text(st, show_all=False):
     srcs = [f"{s} ({o['date']})" for s, o in st["offers"].items()]
     out.append("📥 قوائم الواتس: " + ("، ".join(srcs) if srcs else "مفيش"))
     out.append(f"📦 ملف فولت: {st['volt']['date']}")
-    out.append(f"الجملة = سعر المورد المختار + {st['whole_add']}\n")
+    if st.get("stock"):
+        out.append(f"📊 المخزون من ملف CSV: {st['stock']['date']} — بقارن الأصناف اللي ليها مخزون بس")
+    else:
+        out.append("📊 مفيش ملف مخزون، فبقارن كل الأصناف. ابعت ملف «تصدير (CSV)» من فولت عشان أقارن الموجود بس.")
+    out.append(f"الجملة المقترحة = سعر المورد ✅ + {st['whole_add']}")
+    out.append(LEGEND + "\n")
     shown = [e for e in r["entries"] if show_all or important(e, st)]
     hidden = len(r["entries"]) - len(shown)
     out += [entry_text(e, st) for e in shown]
@@ -337,7 +354,8 @@ def review_text(st, show_all=False):
         out.append("\n❗ من غير باركود في فولت (مش هيتعدلوا):")
         out += [f"• {n}" for n in r["no_barcode"]]
     if r["no_offer"]:
-        out.append(f"\n➖ {len(r['no_offer'])} صنف مالقتلهمش سعر عند أي تاجر.")
+        out.append("\n➖ موجودين عندك ومالقتلهمش سعر عند أي مورد:")
+        out += [f"• {n}" for n in r["no_offer"]]
     out.append("\n✏️ للتعديل اكتب سطر أو أكتر:\n"
                "3 بيع 12500  •  3 جملة 12000  •  3 العزيزي  •  3 تخطي  •  3 رجوع\n"
                "ولما تخلص اكتب: موافق")
@@ -440,7 +458,7 @@ def volt_age_warning(st):
 # ---------- استقبال الرسايل ----------
 
 PRICING_HELP = """💰 مراجعة أسعار MK
-1) صدّر من فولت «تصدير Excel للاستيراد» (من غير بحث) وابعت الملف هنا.
+1) صدّر من فولت «تصدير Excel للاستيراد» و«تصدير (CSV)» (من غير بحث) وابعت الملفين هنا.
 2) انسخ قوايم أسعار التجار من الواتس والصقها هنا.
 3) اكتب: مراجعة
 4) عدّل لو حابب، وبعدين اكتب: موافق ← هيجيلك ملف تستورده في فولت.
@@ -522,8 +540,30 @@ def handle_text(text, st):
 
 def handle_document(doc, st, download):
     name = doc.get("file_name", "")
+    if name.lower().endswith(".csv"):
+        import csv
+        data = download(doc["file_id"]).decode("utf-8-sig", errors="replace")
+        rows = list(csv.DictReader(io.StringIO(data)))
+        if not rows or "المخزون" not in rows[0] or "الباركود" not in rows[0]:
+            return "⚠️ ده مش ملف «تصدير (CSV)» بتاع فولت."
+        if len(rows) < 20:
+            return f"⚠️ الملف فيه {len(rows)} صنف بس. صدّر من غير ما تكون عامل بحث، والتصنيف على «الكل»."
+        items = {}
+        for r in rows:
+            bc = (r.get("الباركود") or "").strip()
+            try:
+                q = float((r.get("المخزون") or "0").translate(AR_DIGITS))
+            except ValueError:
+                q = 0
+            if bc:
+                items[bc] = q
+        st["stock"] = {"date": now(), "items": items}
+        if st.get("review") and st.get("volt"):
+            build_review(st)
+        n = sum(1 for q in items.values() if q > 0)
+        return f"📊 اتسجّل المخزون: {n} صنف ليهم مخزون. هقارن الموجود بس.\nاكتب: مراجعة"
     if not name.lower().endswith(".xlsx"):
-        return "ابعت ملف «تصدير Excel للاستيراد» من فولت (xlsx) — مش CSV."
+        return "ابعت ملف «تصدير Excel للاستيراد» (xlsx) أو «تصدير (CSV)» من فولت."
     data = download(doc["file_id"])
     try:
         items = parse_volt_xlsx(data)
@@ -533,4 +573,6 @@ def handle_document(doc, st, download):
         return f"⚠️ الملف فيه {len(items)} موبايل بس. صدّر من غير ما تكون عامل بحث."
     st["volt"] = {"file_id": doc["file_id"], "date": now(), "items": items}
     st["review"] = None
-    return f"📦 اتسجّل ملف فولت: {len(items)} موبايل وتابلت.\nالصق قوايم الواتس، أو اكتب: مراجعة"
+    return (f"📦 اتسجّل ملف فولت: {len(items)} موبايل وتابلت.\n"
+            + ("" if st.get("stock") else "ابعت كمان ملف «تصدير (CSV)» عشان أعرف المخزون وأقارن الموجود بس.\n")
+            + "الصق قوايم الواتس، أو اكتب: مراجعة")
