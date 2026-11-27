@@ -185,6 +185,7 @@ def parse_volt_xlsx(data):
             "model": model_key(base), "is5g": is5g(name),
             "storage": int(m.group(1)) if m else None, "ram": int(m.group(2)) if m else None,
             "sell": float(r[ix["سعر البيع"]] or 0), "whole": float(r[ix["سعر بيع الجملة"]] or 0),
+            "buy": float(r[ix["سعر الشراء"]] or 0),   # للعرض بس — عمره ما بيتغير
         })
     return items
 
@@ -219,6 +220,7 @@ def compute_entries(st):
                         "cost": o["price"] + (ship if o["is_yt"] else 0), "is_yt": o["is_yt"]}
                        for s, o in best.items()), key=lambda x: x["cost"])
         entries.append({"barcode": it["barcode"], "name": it["name"], "sell": it["sell"],
+                        "buy": it.get("buy", 0),
                         "whole": it["whole"], "opts": opts, "pick": opts[0]["supplier"],
                         "new_sell": None, "new_whole": None, "skip": False})
     return entries, no_storage, no_offer, no_barcode
@@ -228,6 +230,7 @@ def important(e, st):
     """الصنف يستاهل يظهر: فرق الجملة كبير، أو مفيش جملة، أو بيعك أقل من التكلفة، أو إنت عدّلته"""
     cost, sell, whole = final_prices(e, st["whole_add"])
     return (abs(whole - e["whole"]) >= st["threshold"] or not e["whole"] or sell < cost
+            or (e.get("buy") and min(sell, whole) < e["buy"])
             or e["skip"] or e["new_sell"] is not None or e["new_whole"] is not None
             or e["pick"] != e["opts"][0]["supplier"])
 
@@ -256,13 +259,18 @@ def alerts(st):
         st["alerted"][e["barcode"]] = cost
         best = e["opts"][0]
         lines.append(f"{'🔺' if d > 0 else '🔻'} {e['name']}\n"
-                     f"   جملتك {fmt(e['whole'])} ← {fmt(whole)} ({'زاد' if d > 0 else 'نزل'} {fmt(abs(d))})"
-                     f" | قطاعي {fmt(sell)}{'  ⚠️' if sell < cost else ''}\n"
-                     f"   أرخص: {best['supplier']} {fmt(best['price'])}")
+                     f"   جملتك {fmt(e['whole'])} ← المقترح {fmt(whole)} ({'زاد' if d > 0 else 'نزل'} {fmt(abs(d))})"
+                     f" | قطاعي {fmt(sell)}{'  ⚠️' if sell < cost else ''}"
+                     + profit_text(e, sell, whole) + "\n"
+                     f"   أرخص: {best['supplier']} {fmt(best['price'])}"
+                     + (f" (+{fmt(best['cost'] - best['price'])} شحن)" if best['cost'] != best['price'] else ""))
     if not lines:
         return None
-    return (f"🔔 فرق {fmt(st['threshold'])}ج أو أكتر في {len(lines)} صنف:\n\n" + "\n".join(lines)
-            + "\n\nاكتب: مراجعة")
+    head = f"🔔 فرق {fmt(st['threshold'])}ج أو أكتر في {len(lines)} صنف:\n"
+    if st["shipping"] is None:
+        head += "⚠️ شحن يلا تاجر مش متحدد (محسوب صفر) — ابعت مثلاً: /shipping 100\n"
+    return (head + "\n" + "\n".join(lines)
+            + "\n\n🔴 = هتبيع بأقل من سعر شرائك. سعر الشراء في فولت مبيتغيرش أبداً.\nاكتب: مراجعة")
 
 
 def picked(e):
@@ -274,6 +282,17 @@ def final_prices(e, whole_add):
     sell = e["new_sell"] if e["new_sell"] is not None else e["sell"]
     whole = e["new_whole"] if e["new_whole"] is not None else cost + whole_add
     return cost, sell, whole
+
+
+def profit_text(e, sell, whole):
+    """ربحك على سعر الشراء الأصلي (اللي في فولت)"""
+    buy = e.get("buy") or 0
+    if not buy:
+        return ""
+    def one(label, v):
+        d = v - buy
+        return f"{label} {'+' if d >= 0 else '−'}{fmt(abs(d))}{' 🔴' if d < 0 else ''}"
+    return f"\n   شراءك {fmt(buy)} ← ربح: {one('قطاعي', sell)} • {one('جملة', whole)}"
 
 
 def entry_text(e, st):
@@ -288,7 +307,8 @@ def entry_text(e, st):
         p = f"{fmt(o['price'])}+{fmt(o['cost'] - o['price'])}" if o["cost"] != o["price"] else fmt(o["price"])
         opts.append(("✅ " if o["supplier"] == e["pick"] else "") + f"{o['supplier']} {p}")
     return (f"{e['n']}) {e['name']}\n"
-            f"   قطاعي {sell_txt}{warn} | جملة {whole_txt}\n"
+            f"   قطاعي {sell_txt}{warn} | جملة {whole_txt}"
+            + profit_text(e, sell, whole) + "\n"
             f"   " + " • ".join(opts))
 
 
