@@ -310,18 +310,18 @@ def download(file_id):
 
 
 def approve(cid, pst):
-    data, n = pricing.build_volt_file(pst, download(pst["volt"]["file_id"]))
-    if n == 0:
-        send(cid, "مفيش أي سعر اتغير، مفيش ملف.")
+    changes = pricing.approve_changes(pst)
+    if not changes:
+        send(cid, "مفيش أي سعر محتاج يتغير.")
         return
-    name = "volt-prices-" + datetime.now(CAIRO).strftime("%Y-%m-%d_%H%M") + ".xlsx"
-    requests.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument",
-                  data={"chat_id": cid, "caption":
-                        f"📤 ملف استيراد فولت: {n} صنف اتغير سعرهم.\n"
-                        "الكمية فيه صفر، فالمخزون مش هيتغير.\n"
-                        "قبل التأكيد في فولت: بص إن كله «تحديث» مش «جديد».\n"
-                        + pricing.volt_age_warning(pst)},
-                  files={"document": (name, data)}, timeout=60)
+    codes = pricing.volt_codes(changes)
+    send(cid, f"✅ {len(changes)} صنف هيتغير سعرهم في فولت.\n"
+              "1) انسخ الرسالة اللي جاية (دوس عليها مطوّل ← نسخ)\n"
+              "2) افتح فولت في Chrome ودوس زرار «تحديث أسعار فولت»\n"
+              "3) الصق الكود ووافق"
+              + (f"\n\n⚠️ الكود طويل فاتقسم {len(codes)} رسايل — كل واحدة لوحدها في الزرار." if len(codes) > 1 else ""))
+    for c in codes:
+        send(cid, c)
 
 
 def send(cid, text):

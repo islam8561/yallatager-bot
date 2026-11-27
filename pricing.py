@@ -47,6 +47,8 @@ def load_state(token):
     st.setdefault("threshold", 500)   # أقل فرق يستاهل تنبيه
     st.setdefault("applied", {})      # باركود -> [قطاعي, جملة] آخر أسعار البوت حطها (عشان نعرف اللي عدّلته بإيدك)
     st.setdefault("min_change", 50)   # أقل فرق يستاهل نغيّر السعر عشانه
+    if st.get("code_v") != 1:         # ملف الإكسل مكانش بيغيّر الأسعار فعلاً: نبدأ من جديد
+        st.update(code_v=1, applied={}, review=None)
     if st.get("rule_v") != 2:         # القاعدة: قطاعي = أرخص مورد + 500، جملة = أرخص مورد + 100
         st.update(rule_v=2, retail_add=500, whole_add=100)
     st.setdefault("alerted", {})      # باركود -> آخر تكلفة اتبعتلك عنها تنبيه
@@ -511,6 +513,38 @@ def build_volt_file(st, data):
     return out.getvalue(), ws.max_row - 1
 
 
+def approve_changes(st):
+    """الأصناف اللي هتتغير (باركود، قطاعي، جملة) — وبنسجّلها كأساس للمقارنة الجاية"""
+    out = []
+    for e in st["review"]["entries"]:
+        if e["skip"] or status(e, st) != "changed":
+            continue
+        cost, sell, whole = final_prices(e, st)
+        sell, whole = round(sell), round(whole)
+        out.append((e["barcode"], sell, whole, e["name"]))
+        rule = rule_prices(e, st)[1:] if (e["new_sell"] is not None or e["new_whole"] is not None) else (sell, whole)
+        st["applied"][e["barcode"]] = list(rule)
+    newp = {b: (sl, wh) for b, sl, wh, _ in out}
+    for it in st["volt"]["items"]:
+        if it["barcode"] in newp:
+            it["sell"], it["whole"] = newp[it["barcode"]]
+    return out
+
+
+def volt_codes(changes, limit=3500):
+    """كود بيتلصق في زرار «تحديث أسعار فولت» — بيتقسم لو طويل"""
+    codes, cur = [], ""
+    for b, sl, wh, _ in changes:
+        part = f"{b}={sl}/{wh};"
+        if len(cur) + len(part) > limit:
+            codes.append("MKV1:" + cur)
+            cur = ""
+        cur += part
+    if cur:
+        codes.append("MKV1:" + cur)
+    return codes
+
+
 def volt_age_warning(st):
     d = datetime.strptime(st["volt"]["date"], "%Y-%m-%d %H:%M").replace(tzinfo=CAIRO)
     if datetime.now(CAIRO) - d > timedelta(hours=24):
@@ -525,7 +559,7 @@ PRICING_HELP = """💰 مراجعة أسعار MK
 1) صدّر من فولت «تصدير Excel للاستيراد» و«تصدير (CSV)» (من غير بحث) وابعت الملفين هنا.
 2) انسخ قوايم أسعار التجار من الواتس والصقها هنا.
 3) اكتب: مراجعة
-4) عدّل لو حابب، وبعدين اكتب: موافق ← هيجيلك ملف تستورده في فولت.
+4) اكتب: موافق ← هيجيلك كود، انسخه ودوس زرار «تحديث أسعار فولت» في فولت والصقه.
 
 /shipping 100 — شحن يلا تاجر على القطعة
 /retail 500 — القطاعي = أرخص مورد + كام
