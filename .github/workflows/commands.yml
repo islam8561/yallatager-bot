@@ -4,6 +4,8 @@ on:
   schedule:
     - cron: "*/5 * * * *"   # كل 5 دقايق
   workflow_dispatch:
+  repository_dispatch:
+    types: [tg]   # وسيط Cloudflare بيشغّله أول ما توصل رسالة
 
 permissions:
   contents: write
@@ -25,6 +27,8 @@ jobs:
       - name: رد على الأوامر
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET }}
         run: python monitor.py commands
       - name: احفظ الإعدادات
         if: always()

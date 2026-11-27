@@ -25,6 +25,8 @@ jobs:
       - name: شيك على الأسعار
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          WORKER_URL: ${{ secrets.WORKER_URL }}
+          BOT_SECRET: ${{ secrets.BOT_SECRET }}
         run: python monitor.py
       - name: احفظ الأسعار والإعدادات
         if: always()

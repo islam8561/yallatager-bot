@@ -220,8 +220,18 @@ def handle(text, s):
 def process_updates(s):
     """بيقرا رسايلك للبوت وينفذ الأوامر. بيرجع رقم المحادثة"""
     cid = chat_id()
-    res = tg("getUpdates", offset=s["offset"], timeout=0,
-             allowed_updates=json.dumps(["message", "my_chat_member"])).get("result", [])
+    worker = os.environ.get("WORKER_URL", "").strip().rstrip("/")
+    res = []
+    if worker:  # الرسايل بتيجي من وسيط Cloudflare (رد سريع)
+        try:
+            res = requests.get(worker + "/updates", params={"offset": s["offset"]},
+                               headers={"X-Key": os.environ.get("BOT_SECRET", "")},
+                               timeout=30).json().get("result", [])
+        except Exception as e:
+            print("WORKER ERROR:", repr(e))
+    else:
+        res = tg("getUpdates", offset=s["offset"], timeout=0,
+                 allowed_updates=json.dumps(["message", "my_chat_member"])).get("result", [])
     if not s.get("cmds_v3"):  # نسجل قائمة الأوامر في تيليجرام
         s["cmds_v3"] = True
         tg("setMyCommands", commands=json.dumps([
